@@ -8,17 +8,17 @@ from lightning.pytorch.callbacks import ModelCheckpoint
 from augmentations import train_transform
 
 #SPECIFY PARAMETERS FOR TRAINING
-dir_name="0.2-50.0"
+dir_name="Fluo-N2DH-GOWT1"
 max_epochs=200
-feat_channels=32
+feat_channels=8
 add_positional_encoding=True
 margin=1.5
 augmenter=train_transform
 
 num_freqs=10
 
-root_folder=os.path.join("/home/tristan/code/SINETRA/dataset/hydra_flow", dir_name)
-subfolders=["111","222","333"]
+root_folder=os.path.join("/home/tristan/data/CTC_SINETRA_seg", dir_name)
+subfolders=["01","01","02"]
 
 data_module=SpagDataModule(
     root_folder=root_folder,
