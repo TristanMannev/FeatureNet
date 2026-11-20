@@ -7,10 +7,10 @@ import numpy as np
 import torch
 
 
-# PAS DE CONTRAINTES
+# NO CONSTRAINTS
 def cluster_features_to_instances(dense_features, foreground_mask, method='hdbscan', margin=1.5, min_cell_size=100):
     """
-    Clusters pixel embeddings into discrete instance masks.
+    Clusters pixel embeddings into discrete instance masks. Uses a density-based clustering algorithm (DBSCAN, MeanShift, or HDBSCAN) to group pixels based on their feature embeddings.
     
     Args:
         dense_features: Tensor or numpy array of shape (T, C, H, W)
@@ -107,7 +107,7 @@ def cluster_features_to_instances(dense_features, foreground_mask, method='hdbsc
 def dbscan_with_connected_components(dense_features, foreground_mask, eps=0.5, min_samples=2):
     """
     A custom DBSCAN that enforces a connected components constraint:
-    Two points cannot belong to the same cluster if they are not spatially connected.
+    Two pixels cannot belong to the same cluster if they are not spatially connected.
     
     Args:
         dense_features: (N, C) array of averaged 64-d cell embeddings.
@@ -308,6 +308,10 @@ def cluster_spatial_graph(g, node_grid, binary_mask, min_cell_size=50, resolutio
     
     return instance_mask
 
+
+
+#TRACKING FUNCTIONS
+
 from scipy.ndimage import center_of_mass
 def instance_mask_to_features(instance_mask, dense_features):
     """
@@ -344,7 +348,7 @@ def instance_mask_to_features(instance_mask, dense_features):
 import numpy as np
 from scipy.spatial.distance import cdist
 
-def constrained_dbscan_tracking(features, frames, eps=0.5, min_samples=2):
+def constrained_dbscan_tracking(features, frames, eps=0.5, min_samples=2): #buggy ?
     """
     Custom DBSCAN that enforces a Cannot-Link constraint:
     Two points cannot belong to the same cluster if they share the same frame ID.
@@ -414,5 +418,4 @@ def constrained_dbscan_tracking(features, frames, eps=0.5, min_samples=2):
                     
         cluster_id += 1
 
-    # Final Cleanup: Remove 
     return labels

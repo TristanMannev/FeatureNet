@@ -1,11 +1,15 @@
-import os
+import time
 
+import os
 from models.unet import SiameseUNet
 from lightning import Trainer
 from lightning.pytorch.loggers import TensorBoardLogger
 from data.data import SpagDataModule
 from lightning.pytorch.callbacks import ModelCheckpoint
 from augmentations import train_transform
+
+time.sleep(600*60) # wait for the GPU to be free
+
 
 #SPECIFY PARAMETERS FOR TRAINING
 dir_name="Fluo-N2DH-GOWT1"
@@ -33,7 +37,7 @@ data_module=SpagDataModule(
 )
 
 
-model=SiameseUNet(in_channels=1, features=[64, 128, 256], feat_channels=feat_channels, contrastive_distance_threshold=margin, spots_channels=1, main_lr=1e-4, spots_lr=1e-4, max_epochs=max_epochs, add_positional_encoding=add_positional_encoding)
+model=SiameseUNet(in_channels=1, features=[64, 128, 256], feat_channels=feat_channels, contrastive_distance_threshold=margin, seg_channels=1, feat_lr=1e-4, seg_lr=1e-4, max_epochs=max_epochs, add_positional_encoding=add_positional_encoding, reg_weight=0.001)
 model.automatic_optimization = False
 logger=TensorBoardLogger(
     save_dir=f"training_logs/{model.__class__.__name__}_aug/SinePositionalEncoding",

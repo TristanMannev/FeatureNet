@@ -310,14 +310,14 @@ class SiameseUNetBase(nn.Module):
             self.up_feat = UnetUpWithPositionalEncoding(feat_channels*out_channels, features)
         else:
             self.up_feat = UnetUp(feat_channels*out_channels, features)
-        self.up_spots = UnetUp(out_channels, features)
+        self.up_seg = UnetUp(out_channels, features)
         self.add_positional_encoding = add_positional_encoding
 
     def forward(self, x):
         skip_connections, bottleneck_input = self.down(x)
-        spots_output = self.up_spots(bottleneck_input, skip_connections)
+        seg_output = self.up_seg(bottleneck_input, skip_connections)
         feat_output = self.up_feat(bottleneck_input, skip_connections)
-        return spots_output, feat_output.reshape(feat_output.shape[0], self.out_channels, self.feat_channels, feat_output.shape[2], feat_output.shape[3])
+        return seg_output, feat_output.reshape(feat_output.shape[0], self.out_channels, self.feat_channels, feat_output.shape[2], feat_output.shape[3])
     
 
 class UNet(L.LightningModule):
@@ -388,14 +388,14 @@ class UNet(L.LightningModule):
             optimizer, lr_lambda=warmup_lambda
         )
 
-        # Main scheduler: StepLR after warmup
-        main_scheduler = torch.optim.lr_scheduler.StepLR(
+        # feat scheduler: StepLR after warmup
+        feat_scheduler = torch.optim.lr_scheduler.StepLR(
             optimizer, step_size=int(self.max_epochs / 3), gamma=0.1
         )
 
         scheduler = torch.optim.lr_scheduler.SequentialLR(
             optimizer,
-            schedulers=[warmup_scheduler, main_scheduler],
+            schedulers=[warmup_scheduler, feat_scheduler],
             milestones=[warmup_epochs],
         )
 
@@ -510,81 +510,94 @@ class SiameseUNet(L.LightningModule):
     def __init__(
         self,
         in_channels: int = 1,
-        spots_channels: int = 1,
+        seg_channels: int = 1,
         feat_channels: int = 32,
         features: List[int] = [64, 128, 256, 512],
-        main_lr: float = 1e-3,
-        spots_lr: float = 1e-4,
+        feat_lr: float = 1e-3,
+        seg_lr: float = 1e-4,
         max_epochs: int = 30,
         contrastive_distance_threshold: float = 1.5,
         add_positional_encoding: bool = False,
-        
+        var_weight: float = 1.0,
+        dist_weight: float = 1.0,
+        reg_weight: float = 0.1,
+
     ):
-
-
         super().__init__()
-        self.main_lr = main_lr
-        self.spots_lr = spots_lr
+        self.feat_lr = feat_lr
+        self.seg_lr = seg_lr
         self.in_channels = in_channels
-        self.spots_channels = spots_channels
+        self.seg_channels = seg_channels
         self.feat_channels = feat_channels
         self.features = features
         self.max_epochs = max_epochs
         self.contrastive_distance_threshold = contrastive_distance_threshold
         self.add_positional_encoding = add_positional_encoding
+        self.var_weight = var_weight
+        self.dist_weight = dist_weight
+        self.reg_weight = reg_weight
         self.loss_fn_seg = nn.BCEWithLogitsLoss()
         self.loss_fn_feat = None # contrastive loss to be implemented
-        self.model = SiameseUNetBase(in_channels, spots_channels, feat_channels, features, add_positional_encoding)
+        self.model = SiameseUNetBase(in_channels, seg_channels, feat_channels, features, add_positional_encoding)
 
         self.save_hyperparameters()
-
     def forward(self, x):
         return self.model(x)
 
     def training_step(self, batch, batch_idx):
-        opt_main, opt_spots = self.optimizers()
+        opt_feat, opt_seg = self.optimizers()
 
-        opt_main.zero_grad()
-        opt_spots.zero_grad()
-        x,y= batch
+        opt_feat.zero_grad()
+        opt_seg.zero_grad()
+        x, y = batch
         logits, feat_output = self(x)
         y_seg = (y > 0).to(torch.float32)
         loss_seg = self.loss_fn_seg(logits, y_seg)  
-        
 
-        total_loss, var_loss, dist_loss = self.compute_instance_contrastive_loss(dense_features=feat_output, instance_mask=y, margin=self.contrastive_distance_threshold)
-   
+        total_loss, var_loss, dist_loss, reg_loss = self.compute_instance_contrastive_loss(
+            dense_features=feat_output,
+            instance_mask=y,
+            margin=self.contrastive_distance_threshold,
+            var_weight=self.var_weight,
+            dist_weight=self.dist_weight,
+            reg_weight=self.reg_weight,
+        )
 
         self.log("train/var_loss", var_loss, on_step=True, prog_bar=True)
         self.log("train/dist_loss", dist_loss, on_step=True, prog_bar=True)
+        self.log("train/reg_loss", reg_loss, on_step=True, prog_bar=True)
         self.log("train/total_loss", total_loss, on_step=True, prog_bar=True)
         self.log("train/loss_seg", loss_seg, on_step=True, prog_bar=True)
-        #log lr
-        lr_main = opt_main.param_groups[0]["lr"]
-        lr_spots = opt_spots.param_groups[0]["lr"]
-        self.log("train/lr_main", lr_main, on_step=True, prog_bar=True)
-        self.log("train/lr_spots", lr_spots, on_step=True, prog_bar=True)
-        # Update both optimizers wrt their respective losses
+
+        lr_feat = opt_feat.param_groups[0]["lr"]
+        lr_seg = opt_seg.param_groups[0]["lr"]
+        self.log("train/lr_feat", lr_feat, on_step=True, prog_bar=True)
+        self.log("train/lr_seg", lr_seg, on_step=True, prog_bar=True)
+
         self.manual_backward(loss_seg, retain_graph=True)
         self.manual_backward(total_loss)
         self.clip_gradients(
-            opt_spots, gradient_clip_val=1.0, gradient_clip_algorithm="norm"
+            opt_seg, gradient_clip_val=1.0, gradient_clip_algorithm="norm"
         )
         self.clip_gradients(
-            opt_main, gradient_clip_val=1.0, gradient_clip_algorithm="norm"
+            opt_feat, gradient_clip_val=1.0, gradient_clip_algorithm="norm"
         )
-        opt_main.step()
-        opt_spots.step()
-
-    def on_train_start(self):
-        if self.logger is not None:
-            self.logger.log_hyperparams(self.hparams)
-        return super().on_train_start()
+        opt_feat.step()
+        opt_seg.step()
 
 
-    def compute_instance_contrastive_loss(self, dense_features, instance_mask, margin=1.5, var_weight=1.0, dist_weight=1.0):
+    def compute_instance_contrastive_loss(
+        self,
+        dense_features,
+        instance_mask,
+        margin=1.5,
+        var_weight=1.0,
+        dist_weight=1.0,
+        reg_weight=0.001,
+    ):
         """
-        Computes the intra-cell consistency loss and inter-cell contrastive loss.
+        Computes the intra-cell consistency loss, inter-cell contrastive loss,
+        and origin regularization loss.
         
         Args:
             dense_features: Tensor of shape (B, T, C, H, W)
@@ -592,16 +605,17 @@ class SiameseUNet(L.LightningModule):
             margin: The minimum feature distance required between different cells.
             var_weight: Weight applied to the internal consistency (pull) loss.
             dist_weight: Weight applied to the contrastive (push) loss.
+            reg_weight: Weight applied to the regularization (norm -> 0) loss.
             
         Returns:
-            total_loss (scalar), var_loss (scalar), dist_loss (scalar)
+            total_loss (scalar), var_loss (scalar), dist_loss (scalar), reg_loss (scalar)
         """
         B, T, C, H, W = dense_features.shape
         
-        # Use standard lists to collect losses for each item in the batch
         batch_total_loss = []
         batch_var_loss = []
         batch_dist_loss = []
+        batch_reg_loss = []
         
         for b in range(B):
             feat_flat = dense_features[b].view(C, H * W * T)
@@ -618,7 +632,8 @@ class SiameseUNet(L.LightningModule):
                 batch_total_loss.append(zero_loss)
                 batch_var_loss.append(zero_loss)
                 batch_dist_loss.append(zero_loss)
-                continue # Move to the next image in the batch, DO NOT return
+                batch_reg_loss.append(zero_loss)
+                continue
                 
             # 2. Create boolean masks for each cell safely 
             cell_masks = (mask_flat.unsqueeze(1) == cell_ids.unsqueeze(0)).to(feat_flat.dtype)
@@ -651,33 +666,41 @@ class SiameseUNet(L.LightningModule):
                 push_penalty = push_penalty * mask_off_diag
                 dist_loss = push_penalty.sum() / (num_cells * (num_cells - 1))
             else:
-                # Requires grad isn't strictly necessary here if var_loss has it, 
-                # but it is safer to include it.
                 dist_loss = torch.tensor(0.0, device=dense_features.device)
+
+            # -------------------------------------------------------------
+            # LOSS 3: Regularization Loss (Pull cluster means toward 0)
+            # -------------------------------------------------------------
+            reg_loss = torch.linalg.vector_norm(cell_means, ord=2, dim=0).mean()
                 
             # -------------------------------------------------------------
             # Total Loss
             # -------------------------------------------------------------
-            total_loss = (var_weight * var_loss) + (dist_weight * dist_loss)
+            total_loss = (
+                (var_weight * var_loss)
+                + (dist_weight * dist_loss)
+                + (reg_weight * reg_loss)
+            )
 
-            # Append to our lists
             batch_total_loss.append(total_loss)
             batch_var_loss.append(var_loss)
             batch_dist_loss.append(dist_loss)
+            batch_reg_loss.append(reg_loss)
 
-        # Stack the lists into tensors and calculate the mean across the batch dimension
-        # torch.stack is fully differentiable and avoids in-place operations
         mean_total_loss = torch.stack(batch_total_loss).mean()
         mean_var_loss = torch.stack(batch_var_loss).mean()
         mean_dist_loss = torch.stack(batch_dist_loss).mean()
+        mean_reg_loss = torch.stack(batch_reg_loss).mean()
         
-        return mean_total_loss, mean_var_loss, mean_dist_loss
-    def configure_optimizers(self):
-        main_params = list(self.model.down.parameters()) + list(self.model.up_feat.parameters())
-        spots_params = list(self.model.down.parameters()) + list(self.model.up_spots.parameters())
+        return mean_total_loss, mean_var_loss, mean_dist_loss, mean_reg_loss
 
-        main_optimizer = torch.optim.Adam(params=main_params, lr=self.main_lr)
-        spots_optimizer = torch.optim.Adam(params=spots_params, lr=self.spots_lr)
+    
+    def configure_optimizers(self):
+        feat_params = list(self.model.down.parameters()) + list(self.model.up_feat.parameters())
+        seg_params = list(self.model.down.parameters()) + list(self.model.up_seg.parameters())
+
+        feat_optimizer = torch.optim.Adam(params=feat_params, lr=self.feat_lr)
+        seg_optimizer = torch.optim.Adam(params=seg_params, lr=self.seg_lr)
         # optimizer=torch.optim.SGD(self.parameters(), lr=self.lr)
 
         # Warmup scheduler: linearly increase LR for the first 5 epochs
@@ -687,37 +710,37 @@ class SiameseUNet(L.LightningModule):
             return min(1.0, (epoch + 1) / warmup_epochs)
     
         warmup_scheduler = torch.optim.lr_scheduler.LambdaLR(
-            main_optimizer, lr_lambda=warmup_lambda
+            feat_optimizer, lr_lambda=warmup_lambda
         )
 
-        # Main scheduler: StepLR after warmup
+        # feat scheduler: StepLR after warmup
         step_scheduler = torch.optim.lr_scheduler.StepLR(
-            main_optimizer, step_size=int(self.max_epochs / 3), gamma=0.1
+            feat_optimizer, step_size=int(self.max_epochs / 3), gamma=0.1
         )
 
-        main_scheduler = torch.optim.lr_scheduler.SequentialLR(
-            main_optimizer,
+        feat_scheduler = torch.optim.lr_scheduler.SequentialLR(
+            feat_optimizer,
             schedulers=[warmup_scheduler, step_scheduler],
             milestones=[warmup_epochs],
         )
 
-        spots_scheduler = torch.optim.lr_scheduler.StepLR(
-            spots_optimizer, step_size=int(self.max_epochs / 3), gamma=0.1
+        seg_scheduler = torch.optim.lr_scheduler.StepLR(
+            seg_optimizer, step_size=int(self.max_epochs / 3), gamma=0.1
         )
 
         return [
             {
-                "optimizer": main_optimizer,
+                "optimizer": feat_optimizer,
                 "lr_scheduler": {
-                    "scheduler": main_scheduler,
+                    "scheduler": feat_scheduler,
                     "interval": "epoch",
                     "frequency": 1,
                 }
             },
             {
-                "optimizer": spots_optimizer,
+                "optimizer": seg_optimizer,
                 "lr_scheduler": {
-                    "scheduler": spots_scheduler,
+                    "scheduler": seg_scheduler,
                     "interval": "epoch",
                     "frequency": 1,
                 }
@@ -731,18 +754,25 @@ class SiameseUNet(L.LightningModule):
         y_seg = (y > 0).to(torch.float32)
         loss_seg = self.loss_fn_seg(logits, y_seg)  
         
-        total_loss, var_loss, dist_loss = self.compute_instance_contrastive_loss(dense_features=feat_output, instance_mask=y, margin=self.contrastive_distance_threshold)
+        total_loss, var_loss, dist_loss, reg_loss = self.compute_instance_contrastive_loss(
+            dense_features=feat_output,
+            instance_mask=y,
+            margin=self.contrastive_distance_threshold,
+            var_weight=self.var_weight,
+            dist_weight=self.dist_weight,
+            reg_weight=self.reg_weight,
+        )
     
         self.log("val/var_loss", var_loss, on_step=False, on_epoch=True, prog_bar=True)
         self.log("val/dist_loss", dist_loss, on_step=False, on_epoch=True, prog_bar=True)
+        self.log("val/reg_loss", reg_loss, on_step=False, on_epoch=True, prog_bar=True)
         self.log("val/total_loss", total_loss, on_step=False, on_epoch=True, prog_bar=True)
         self.log("val/loss_seg", loss_seg, on_step=False, on_epoch=True, prog_bar=True)
-
         
     def on_train_epoch_end(self):
-        main_scheduler, spots_scheduler = self.lr_schedulers()
-        main_scheduler.step()
-        spots_scheduler.step()
+        feat_scheduler, seg_scheduler = self.lr_schedulers()
+        feat_scheduler.step()
+        seg_scheduler.step()
 
         if self.current_epoch % 20 == 0:
             dir_path = getattr(self.logger, "log_dir", None)
@@ -775,19 +805,19 @@ class SiameseUNet(L.LightningModule):
 
             x = batch[0]
             x = x.to(self.device)
-            spots_output, feat_output = self(x)
-            spots_probs = torch.sigmoid(spots_output)
+            seg_output, feat_output = self(x)
+            seg_probs = torch.sigmoid(seg_output)
             if not keep_pseudo_probs:
 
                 # save pred in pkl
                 # pickle.dump(preds.cpu().detach().numpy(), open("preds.pkl", "wb"))
-                spots_output = (spots_probs > thresh).float()
+                seg_output = (seg_probs > thresh).float()
                 feat_output = feat_output.cpu().detach()
             else:
                 # If keep_pseudo_probs is True, we return the raw model output
-                spots_output = spots_probs.cpu().detach()
+                seg_output = seg_probs.cpu().detach()
                 feat_output = feat_output.cpu().detach()
-            predictions.append((spots_output, feat_output))
+            predictions.append((seg_output, feat_output))
         return predictions
     
 
@@ -810,8 +840,8 @@ class SiameseUNet(L.LightningModule):
         for batch in tqdm(getattr(datamodule, f"{dataloader}_dataloader")(), desc="Predicting", disable=disable_tqdm):
             x = batch[0]
             x = x.to(self.device)
-            spots_output, feat_output = self(x)
-            bin_mask = (torch.sigmoid(spots_output) > threshold).float().detach()
+            seg_output, feat_output = self(x)
+            bin_mask = (torch.sigmoid(seg_output) > threshold).float().detach()
             feat_output = feat_output.cpu().detach()
             if connected_components:
                 instance_mask=cluster_features_to_instances_connected_components(feat_output, bin_mask, min_cell_size=min_cell_size, margin=self.contrastive_distance_threshold,method=cluster_method,num_workers=num_workers)
