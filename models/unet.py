@@ -9,6 +9,7 @@ from torch.nn import functional as F
 from tqdm import tqdm
 import numpy as np
 from itertools import chain
+from torchvision.models.swin_transformer import SwinTransformerBlock
 
 
 
@@ -233,6 +234,92 @@ class UnetDown(nn.Module):
         return skip_connections, x
 
 
+class SwinTransformerEncoder(nn.Module):
+    """
+    Hierarchical Swin-T encoder that exposes one skip tensor at each spatial level.
+
+    The output layout is compatible with UnetUp:
+    skips are in order from the input resolution to the finest downsampling level,
+    and the bottleneck has half the spatial resolution of the last skip.
+    """
+
+    def __init__(
+        self,
+        in_channels=1,
+        features=[64, 128, 256, 512],
+        depths=None,
+        window_size=7,
+    ):
+        super().__init__()
+        if not features:
+            raise ValueError("features must contain at least one channel width")
+
+        self.features = list(features)
+        if depths is None:
+            depths = [2, 2, 6, 2] if len(features) == 4 else [2] * len(features)
+        if len(depths) != len(features):
+            raise ValueError("depths must contain one depth per encoder stage")
+
+        self.patch_embed = nn.Conv2d(
+            in_channels, features[0], kernel_size=3, stride=1, padding=1
+        )
+
+        self.stages = nn.ModuleList()
+        self.transitions = nn.ModuleList()
+        for stage_index, (feat, depth) in enumerate(zip(features, depths)):
+            blocks = nn.ModuleList()
+            for block_index in range(depth):
+                blocks.append(
+                    SwinTransformerBlock(
+                        dim=feat,
+                        num_heads=max(1, feat // 32),
+                        window_size=[window_size, window_size],
+                        shift_size=(
+                            [0, 0] if block_index % 2 == 0 else [window_size // 2, window_size // 2]
+                        ),
+                        mlp_ratio=4.0,
+                        dropout=0.0,
+                        attention_dropout=0.0,
+                        stochastic_depth_prob=0.0,
+                    )
+                )
+            self.stages.append(blocks)
+
+            if stage_index < len(features) - 1:
+                self.transitions.append(
+                    nn.Conv2d(
+                        feat,
+                        features[stage_index + 1],
+                        kernel_size=2,
+                        stride=2,
+                    )
+                )
+
+        self.bottleneck_downsample = nn.Conv2d(
+            features[-1],
+            features[-1],
+            kernel_size=2,
+            stride=2,
+        )
+
+    def forward(self, x):
+        x = self.patch_embed(x)
+        skip_connections = []
+
+        for stage_index, blocks in enumerate(self.stages):
+            x = x.permute(0, 2, 3, 1)
+            for block in blocks:
+                x = block(x)
+            skip_connections.append(x.permute(0, 3, 1, 2))
+
+            if stage_index < len(self.transitions):
+                x = skip_connections[-1]
+                x = self.transitions[stage_index](x)
+
+        bottleneck = self.bottleneck_downsample(skip_connections[-1])
+        return skip_connections, bottleneck
+
+
 class UnetUp(nn.Module):
     def __init__(self, out_channels=1, features=[64, 128, 256, 512]):
         super().__init__()
@@ -298,14 +385,18 @@ class UnetUpWithPositionalEncoding(nn.Module):
         return self.final_conv(x)
 
 class SiameseUNetBase(nn.Module):
-    def __init__(self, in_channels=1, out_channels=1, feat_channels=32, features=[64, 128, 256, 512], add_positional_encoding=False):
+    def __init__(self, in_channels=1, out_channels=1, feat_channels=32, features=[64, 128, 256, 512], add_positional_encoding=False, transformer=True):
         super().__init__()
         self.in_channels = in_channels
         
         self.feat_channels = feat_channels
         self.out_channels = out_channels
 
-        self.down = UnetDown(in_channels, features)
+        self.transformer = transformer
+        if self.transformer:
+            self.down = SwinTransformerEncoder(in_channels, features)
+        else:
+            self.down = UnetDown(in_channels, features)
         if add_positional_encoding:
             self.up_feat = UnetUpWithPositionalEncoding(feat_channels*out_channels, features)
         else:
@@ -521,6 +612,7 @@ class SiameseUNet(L.LightningModule):
         var_weight: float = 1.0,
         dist_weight: float = 1.0,
         reg_weight: float = 0.1,
+        transformer: bool = True,
 
     ):
         super().__init__()
@@ -538,7 +630,8 @@ class SiameseUNet(L.LightningModule):
         self.reg_weight = reg_weight
         self.loss_fn_seg = nn.BCEWithLogitsLoss()
         self.loss_fn_feat = None # contrastive loss to be implemented
-        self.model = SiameseUNetBase(in_channels, seg_channels, feat_channels, features, add_positional_encoding)
+        self.transformer = transformer
+        self.model = SiameseUNetBase(in_channels, seg_channels, feat_channels, features, add_positional_encoding, transformer)
 
         self.save_hyperparameters()
     def forward(self, x):

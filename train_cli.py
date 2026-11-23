@@ -110,6 +110,31 @@ def parse_args():
         default=10,
         help="How often to log training metrics.",
     )
+
+    parser.add_argument(
+        "--margin",
+        type=float,
+        default=1.5,
+        help="Margin for contrastive loss.",
+    )
+    parser.add_argument(
+        "--reg-weight",
+        type=float,
+        default=0.001,
+        help="Weight for the regularization term.",
+    )
+    parser.add_argument(
+        "--transformer",
+        action="store_true",
+        help="Enable transformer module in the model.",
+    )
+
+    parser.add_argument(
+        "--unet",
+        action="store_false",
+        dest="transformer",
+        help="Disable transformer module in the model. Use U-Net instead.",
+    )
     return parser.parse_args()
 
 
@@ -136,6 +161,10 @@ def main():
         spots_lr=args.spots_lr,
         max_epochs=args.max_epochs,
         add_positional_encoding=args.add_positional_encoding,
+        contrastive_distance_threshold=args.margin,
+        reg_weight=args.reg_weight,
+        transformer=args.transformer,
+
     )
     model.automatic_optimization = False
 

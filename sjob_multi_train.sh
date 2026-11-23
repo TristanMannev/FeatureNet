@@ -18,15 +18,8 @@ mkdir -p "$JOB_DIR"
 # Each entry is: job_name|command_line_arguments
 # Edit this block to launch the parameter sweep you want.
 RUN_SPECS=(
-  "featurenet_posenc_fc32|--dir-name Fluo-N2DH-GOWT1 --max-epochs 400 --feat-channels 32 --add-positional-encoding"
-  "featurenet_no_posenc_fc32|--dir-name Fluo-N2DH-GOWT1 --max-epochs 400 --feat-channels 32 --no-positional-encoding"
-  "featurenet_posenc_fc64|--dir-name Fluo-N2DH-GOWT1 --max-epochs 400 --feat-channels 64 --add-positional-encoding"
-  "featurenet_no_posenc_fc64|--dir-name Fluo-N2DH-GOWT1 --max-epochs 400 --feat-channels 64 --no-positional-encoding"
-  "featurenet_posenc_fc32|--dir-name DIC-C2DH-HeLa --max-epochs 400 --feat-channels 32 --add-positional-encoding"
-  "featurenet_no_posenc_fc32|--dir-name DIC-C2DH-HeLa --max-epochs 400 --feat-channels 32 --no-positional-encoding"
-  "featurenet_posenc_fc64|--dir-name DIC-C2DH-HeLa --max-epochs 400 --feat-channels 64 --add-positional-encoding"
-  "featurenet_no_posenc_fc64|--dir-name DIC-C2DH-HeLa --max-epochs 400 --feat-channels 64 --no-positional-encoding"
-
+  "featurenet_posenc_fc32|--dir-name Fluo-N2DH-GOWT1 --max-epochs 400 --feat-channels 8 --transformer"
+  "featurenet_no_posenc_fc32|--dir-name Fluo-N2DH-GOWT1 --max-epochs 400 --feat-channels 8 --unet" #no transformer
 )
 
 
